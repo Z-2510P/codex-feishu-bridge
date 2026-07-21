@@ -33,5 +33,6 @@ test('cross-platform status helper tolerates a fresh data directory', () => {
   assert.deepEqual(state.allowedOpenIds, []);
   assert.deepEqual(state.defaultChatByUser, {});
   assert.deepEqual(state.activeSessionByUser, {});
+  assert.deepEqual(state.listSnapshotByUser, {});
   assert.equal(state.pairing, null);
 });

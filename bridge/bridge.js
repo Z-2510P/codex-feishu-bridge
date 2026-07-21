@@ -547,10 +547,11 @@ class CompletionWatcher {
 
 function defaultState() {
   return {
-    schema: 1,
+    schema: 2,
     allowedOpenIds: [],
     defaultChatByUser: {},
     activeSessionByUser: {},
+    listSnapshotByUser: {},
     pairing: null,
   };
 }
@@ -560,8 +561,14 @@ function normalizeState(value) {
   if (!Array.isArray(state.allowedOpenIds)) state.allowedOpenIds = [];
   if (!state.defaultChatByUser || typeof state.defaultChatByUser !== 'object') state.defaultChatByUser = {};
   if (!state.activeSessionByUser || typeof state.activeSessionByUser !== 'object') state.activeSessionByUser = {};
+  if (!state.listSnapshotByUser || typeof state.listSnapshotByUser !== 'object') state.listSnapshotByUser = {};
+  for (const [senderId, snapshot] of Object.entries(state.listSnapshotByUser)) {
+    state.listSnapshotByUser[senderId] = Array.isArray(snapshot)
+      ? snapshot.map((code) => String(code).toUpperCase()).filter((code) => /^[A-F0-9]{10}$/.test(code)).slice(0, 20)
+      : [];
+  }
   if (!Object.prototype.hasOwnProperty.call(state, 'pairing')) state.pairing = null;
-  state.schema = 1;
+  state.schema = 2;
   return state;
 }
 
@@ -670,10 +677,10 @@ function parseCommand(input) {
   if (/^\/help$/i.test(text)) return { type: 'help' };
   if (/^\/list$/i.test(text)) return { type: 'list' };
   if (/^\/status$/i.test(text)) return { type: 'status' };
-  if ((match = text.match(/^\/use\s+([A-Fa-f0-9]{6,16})$/))) {
+  if ((match = text.match(/^\/use\s+(\d{1,3}|[A-Fa-f0-9]{6,16})$/))) {
     return { type: 'use', code: match[1].toUpperCase() };
   }
-  if ((match = text.match(/^#([A-Fa-f0-9]{6,16})\s+([\s\S]+)$/))) {
+  if ((match = text.match(/^#(\d{1,3}|[A-Fa-f0-9]{6,16})\s+([\s\S]+)$/))) {
     return { type: 'prompt', code: match[1].toUpperCase(), prompt: sanitizePrompt(match[2]) };
   }
   return { type: 'prompt', code: null, prompt: sanitizePrompt(text) };
@@ -806,7 +813,7 @@ function listCodexThreads(options = {}) {
       method: 'initialize',
       id: 1,
       params: {
-        clientInfo: { name: 'codex_feishu_bridge', title: 'Codex Feishu Bridge', version: '1.1.1' },
+        clientInfo: { name: 'codex_feishu_bridge', title: 'Codex Feishu Bridge', version: '1.2.0' },
       },
     });
   });
@@ -845,9 +852,22 @@ function findSession(code, sessions = loadSessions()) {
   return sessions.find((session) => session.code === normalized) || null;
 }
 
+function resolveSessionSelector(selector, senderId, state, sessions = loadSessions()) {
+  const normalized = String(selector || '').trim().toUpperCase();
+  if (/^\d{1,3}$/.test(normalized)) {
+    const index = Number(normalized) - 1;
+    const snapshot = state.listSnapshotByUser && Array.isArray(state.listSnapshotByUser[senderId])
+      ? state.listSnapshotByUser[senderId]
+      : [];
+    if (index < 0 || index >= snapshot.length) return null;
+    return findSession(snapshot[index], sessions);
+  }
+  return findSession(normalized, sessions);
+}
+
 function resolvePromptTarget(senderId, requestedCode, state, sessions = loadSessions()) {
   if (requestedCode) {
-    const direct = findSession(requestedCode, sessions);
+    const direct = resolveSessionSelector(requestedCode, senderId, state, sessions);
     return direct ? { session: direct, autoSelected: false } : { session: null, autoSelected: false };
   }
   const activeCode = state.activeSessionByUser[senderId];
@@ -931,15 +951,15 @@ function formatSessionList(sessions) {
     lines.push(`${index + 1}. ${safeThreadTitle(session.title)}`);
     lines.push(`   ${session.code} | ${session.project} | ${time}`);
   }
-  lines.push('', '使用 /use 对话码 切换，例如：/use A72F19C304');
+  lines.push('', '使用序号切换，例如：/use 3（也支持 /use 对话码）');
   return lines.join('\n');
 }
 
 const HELP_TEXT = [
   'Codex 飞书桥接命令：',
   '/list - 查看本机已映射的 Codex 对话',
-  '/use 对话码 - 选择后续消息要发送到的对话',
-  '#对话码 消息 - 临时向指定对话发送消息',
+  '/use 序号 - 按最近一次 /list 的序号选择对话',
+  '#序号 消息 - 临时向列表中的指定对话发送消息',
   '/status - 查看当前选择和队列状态',
   '/help - 显示帮助',
   '',
@@ -1087,6 +1107,7 @@ class BridgeRuntime {
         logEvent('warning', 'session_sync_failed', error.message || error.name);
       }
       const sessions = loadSessions();
+      state.listSnapshotByUser[job.senderId] = sessions.slice(0, 20).map((session) => session.code);
       saveState(state);
       await this.sendText(job.chatId, formatSessionList(sessions), job.messageId);
       return;
@@ -1104,14 +1125,16 @@ class BridgeRuntime {
       return;
     }
     if (command.type === 'use') {
-      const session = findSession(command.code, sessions);
+      const session = resolveSessionSelector(command.code, job.senderId, state, sessions);
       if (!session) {
-        await this.sendText(job.chatId, `没有找到对话 ${command.code}。使用 /list 查看。`, job.messageId);
+        const detail = /^\d{1,3}$/.test(command.code) ? `序号 ${command.code} 无效或对应对话已不可用` : `没有找到对话 ${command.code}`;
+        await this.sendText(job.chatId, `${detail}。请先使用 /list 刷新列表。`, job.messageId);
         return;
       }
       state.activeSessionByUser[job.senderId] = session.code;
       saveState(state);
-      await this.sendText(job.chatId, `已切换到 ${session.code} (${session.project})。`, job.messageId);
+      const selectedBy = /^\d{1,3}$/.test(command.code) ? `第 ${command.code} 项` : session.code;
+      await this.sendText(job.chatId, `已切换到${selectedBy}：${safeThreadTitle(session.title)} (${session.project})。`, job.messageId);
       return;
     }
     const inboundImageCount = normalizeInboundImages(job.images).length;
@@ -1123,7 +1146,7 @@ class BridgeRuntime {
 
     const target = resolvePromptTarget(job.senderId, command.code, state, sessions);
     if (!target.session) {
-      await this.sendText(job.chatId, '还没有选中 Codex 对话。请先使用 /list 和 /use 对话码。', job.messageId);
+      await this.sendText(job.chatId, '还没有选中 Codex 对话。请先使用 /list，再用 /use 序号切换。', job.messageId);
       return;
     }
     state.activeSessionByUser[job.senderId] = target.session.code;
@@ -1405,6 +1428,7 @@ module.exports = {
   parseCommand,
   prepareCodexResult,
   resolvePromptTarget,
+  resolveSessionSelector,
   resolveSessionWorkspace,
   safeProjectLeaf,
   safeThreadTitle,

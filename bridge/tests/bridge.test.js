@@ -57,9 +57,15 @@ test.after(() => {
 test('command parsing supports pairing, routing, and plain prompts', () => {
   assert.deepEqual(bridge.parseCommand('/pair ABCD-2345'), { type: 'pair', code: 'ABCD-2345' });
   assert.deepEqual(bridge.parseCommand('/use a72f19c304'), { type: 'use', code: 'A72F19C304' });
+  assert.deepEqual(bridge.parseCommand('/use 3'), { type: 'use', code: '3' });
   assert.deepEqual(bridge.parseCommand('#A72F19C304 continue the task'), {
     type: 'prompt',
     code: 'A72F19C304',
+    prompt: 'continue the task',
+  });
+  assert.deepEqual(bridge.parseCommand('#2 continue the task'), {
+    type: 'prompt',
+    code: '2',
     prompt: 'continue the task',
   });
   assert.deepEqual(bridge.parseCommand('continue'), { type: 'prompt', code: null, prompt: 'continue' });
@@ -102,6 +108,19 @@ test('session routing selects explicit, active, or single sessions', () => {
   state.activeSessionByUser.user = 'A72F19C304';
   assert.equal(bridge.resolvePromptTarget('user', null, state, twoSessions).session.sessionId, 'session-a');
   assert.equal(bridge.resolvePromptTarget('user', 'B82F19C305', state, twoSessions).session.sessionId, 'session-b');
+});
+
+test('numeric selectors use the latest per-user list snapshot', () => {
+  const sessions = [
+    { code: 'BBBBBB2222', sessionId: 'session-b', title: 'Second', project: 'beta', lastSeenUtc: '2026-07-21T02:00:00Z' },
+    { code: 'AAAAAA1111', sessionId: 'session-a', title: 'First', project: 'alpha', lastSeenUtc: '2026-07-21T01:00:00Z' },
+  ];
+  const state = bridge.defaultState();
+  state.listSnapshotByUser.user = ['AAAAAA1111', 'BBBBBB2222'];
+  assert.equal(bridge.resolveSessionSelector('1', 'user', state, sessions).sessionId, 'session-a');
+  assert.equal(bridge.resolveSessionSelector('2', 'user', state, sessions).sessionId, 'session-b');
+  assert.equal(bridge.resolveSessionSelector('3', 'user', state, sessions), null);
+  assert.equal(bridge.resolveSessionSelector('BBBBBB2222', 'user', state, sessions).sessionId, 'session-b');
 });
 
 test('app-server thread metadata maps without copying conversation previews', () => {
@@ -213,6 +232,7 @@ test('session list shows title, project, code, and update time', () => {
   }]);
   assert.match(text, /Fix login flow/);
   assert.match(text, /A72F19C304 \| alpha/);
+  assert.match(text, /\/use 3/);
 });
 
 test('global completion watcher baselines history and emits only newly completed turns', async () => {
@@ -361,6 +381,31 @@ test('pairing authorizes only the account presenting the local code', async () =
   assert.equal(paired.defaultChatByUser['open-user-1'], 'chat-1');
   assert.equal(paired.pairing, null);
   assert.match(channel.sent[0].input.text, /配对成功/);
+});
+
+test('list snapshots make numeric use stable across current session ordering', async () => {
+  resetRuntimeFiles();
+  fs.rmSync(process.env.CODEX_FEISHU_SESSIONS_DIR, { recursive: true, force: true });
+  writeSession('AAAAAA1111', 'session-a', 'alpha', '2026-07-21T01:00:00Z', 'First task');
+  writeSession('BBBBBB2222', 'session-b', 'beta', '2026-07-21T02:00:00Z', 'Second task');
+  const state = bridge.defaultState();
+  state.allowedOpenIds = ['number-user'];
+  bridge.saveState(state);
+  const channel = new FakeChannel();
+  const runtime = new bridge.BridgeRuntime(channel, { syncSessions: async () => 2 });
+  runtime.enqueueMessage({
+    messageId: 'numeric-list', chatId: 'numeric-chat', chatType: 'p2p', senderId: 'number-user',
+    content: '/list', rawContentType: 'text',
+  });
+  await runtime.tick();
+  assert.deepEqual(bridge.loadState().listSnapshotByUser['number-user'], ['BBBBBB2222', 'AAAAAA1111']);
+  runtime.enqueueMessage({
+    messageId: 'numeric-use', chatId: 'numeric-chat', chatType: 'p2p', senderId: 'number-user',
+    content: '/use 2', rawContentType: 'text',
+  });
+  await runtime.tick();
+  assert.equal(bridge.loadState().activeSessionByUser['number-user'], 'AAAAAA1111');
+  assert.match(channel.sent.at(-1).input.text, /第 2 项：First task/);
 });
 
 test('unauthorized prompts never invoke Codex', async () => {

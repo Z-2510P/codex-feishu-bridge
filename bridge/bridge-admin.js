@@ -27,6 +27,7 @@ function normalizeState(value) {
   if (!Array.isArray(state.allowedOpenIds)) state.allowedOpenIds = [];
   if (!state.defaultChatByUser || typeof state.defaultChatByUser !== 'object') state.defaultChatByUser = {};
   if (!state.activeSessionByUser || typeof state.activeSessionByUser !== 'object') state.activeSessionByUser = {};
+  if (!state.listSnapshotByUser || typeof state.listSnapshotByUser !== 'object') state.listSnapshotByUser = {};
   if (!Object.prototype.hasOwnProperty.call(state, 'pairing')) state.pairing = null;
   state.schema = Number(state.schema || 1);
   return state;
