@@ -11,6 +11,7 @@ const test = require('node:test');
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-feishu-bridge-test-'));
 process.env.CODEX_FEISHU_BRIDGE_DATA_ROOT = testRoot;
 process.env.CODEX_FEISHU_SESSIONS_DIR = path.join(testRoot, 'sessions');
+process.env.CODEX_HOME = path.join(testRoot, 'codex-home');
 
 const bridge = require('../bridge.js');
 
@@ -37,6 +38,12 @@ function resetRuntimeFiles() {
     fs.mkdirSync(directory, { recursive: true });
     for (const name of fs.readdirSync(directory)) fs.rmSync(path.join(directory, name), { recursive: true, force: true });
   }
+}
+
+function writePng(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]));
+  return path.resolve(filePath);
 }
 
 class FakeChannel {
@@ -273,6 +280,7 @@ test('global completion watcher baselines history and emits only newly completed
     startedAt: '2026-07-21T02:00:00Z',
     completedAt: '2026-07-21T02:00:03Z',
     finalResponse: 'private final response must not enter watcher state',
+    generatedImagePaths: [],
   }]);
   assert.equal(fs.readFileSync(statePath, 'utf8').includes('private final response'), false);
   const resumedEvents = [];
@@ -282,6 +290,88 @@ test('global completion watcher baselines history and emits only newly completed
   });
   await resumed.initialize();
   assert.equal(resumedEvents.length, 0);
+});
+
+test('completion watcher sends ImageGen outputs from the same turn and rejects unrelated paths', async () => {
+  const rolloutRoot = path.join(testRoot, 'watch-imagegen-rollouts');
+  const statePath = path.join(testRoot, 'watch-imagegen-state.json');
+  fs.mkdirSync(rolloutRoot, { recursive: true });
+  const sessionId = '22222222-3333-4444-5555-666666666666';
+  const rollout = path.join(rolloutRoot, `rollout-test-${sessionId}.jsonl`);
+  fs.writeFileSync(rollout, '', 'utf8');
+  const generatedRoot = path.join(process.env.CODEX_HOME, 'generated_images', sessionId);
+  const generated = Array.from({ length: 10 }, (_, index) => writePng(path.join(generatedRoot, `exec-${index}.png`)));
+  const outside = writePng(path.join(testRoot, 'not-this-session.png'));
+  const events = [];
+  const watcher = new bridge.CompletionWatcher(async (event) => events.push(event), {
+    sessionsRoot: rolloutRoot,
+    statePath,
+  });
+  await watcher.initialize();
+  const lines = [
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'image-turn' } },
+    ...generated.map((savedPath) => ({
+      type: 'event_msg',
+      payload: { type: 'image_generation_end', status: 'completed', saved_path: savedPath },
+    })),
+    { type: 'event_msg', payload: { type: 'image_generation_end', status: 'completed', saved_path: outside } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'image-turn', last_agent_message: 'done' } },
+  ];
+  fs.appendFileSync(rollout, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, 'utf8');
+  await watcher.scan();
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0].generatedImagePaths, generated);
+  assert.deepEqual(JSON.parse(fs.readFileSync(statePath, 'utf8')).pendingGeneratedImages, {});
+});
+
+test('completion watcher persists pending ImageGen files across restart and clears them at a new turn', async () => {
+  const rolloutRoot = path.join(testRoot, 'watch-imagegen-resume-rollouts');
+  const statePath = path.join(testRoot, 'watch-imagegen-resume-state.json');
+  fs.mkdirSync(rolloutRoot, { recursive: true });
+  const sessionId = '33333333-4444-5555-6666-777777777777';
+  const rollout = path.join(rolloutRoot, `rollout-test-${sessionId}.jsonl`);
+  fs.writeFileSync(rollout, '', 'utf8');
+  const generatedRoot = path.join(process.env.CODEX_HOME, 'generated_images', sessionId);
+  const staleImage = writePng(path.join(generatedRoot, 'stale.png'));
+  const currentImage = writePng(path.join(generatedRoot, 'current.png'));
+  const first = new bridge.CompletionWatcher(async () => {}, { sessionsRoot: rolloutRoot, statePath });
+  await first.initialize();
+  fs.appendFileSync(rollout, `${JSON.stringify({
+    type: 'event_msg',
+    payload: { type: 'image_generation_end', status: 'completed', saved_path: staleImage },
+  })}\n`, 'utf8');
+  await first.scan();
+  const persisted = fs.readFileSync(statePath, 'utf8');
+  assert.match(persisted, /stale\.png/);
+  assert.equal(persisted.includes(generatedRoot), false);
+
+  const events = [];
+  const resumed = new bridge.CompletionWatcher(async (event) => events.push(event), { sessionsRoot: rolloutRoot, statePath });
+  await resumed.initialize();
+  fs.appendFileSync(rollout, `${[
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'fresh-turn' } },
+    { type: 'event_msg', payload: { type: 'image_generation_end', status: 'completed', saved_path: currentImage } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'fresh-turn', last_agent_message: 'fresh' } },
+  ].map((line) => JSON.stringify(line)).join('\n')}\n`, 'utf8');
+  await resumed.scan();
+  assert.deepEqual(events[0].generatedImagePaths, [currentImage]);
+});
+
+test('completion images combine ten ImageGen originals with two final-response images', () => {
+  const sessionId = '44444444-5555-6666-7777-888888888888';
+  const generatedRoot = path.join(process.env.CODEX_HOME, 'generated_images', sessionId);
+  const originals = Array.from({ length: 10 }, (_, index) => writePng(path.join(generatedRoot, `original-${index}.png`)));
+  const workspace = path.join(testRoot, 'completion-workspace');
+  const contactSheet = writePng(path.join(workspace, 'contact-sheet.png'));
+  const comparison = writePng(path.join(workspace, 'comparison.png'));
+  const prepared = bridge.prepareCodexResult(
+    `![contact](<${contactSheet}>) ![comparison](<${comparison}>)`,
+    workspace,
+  );
+  assert.deepEqual(
+    bridge.collectCompletionImagePaths(sessionId, originals, prepared.imagePaths),
+    [...originals, contactSheet, comparison],
+  );
 });
 
 test('global completion notification includes the final assistant response', () => {

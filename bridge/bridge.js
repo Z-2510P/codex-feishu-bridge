@@ -19,10 +19,12 @@ const SESSIONS_DIR = path.resolve(process.env.CODEX_FEISHU_SESSIONS_DIR || path.
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(USER_HOME, '.codex'));
 const CODEX_SESSIONS_ROOT = path.resolve(process.env.CODEX_SESSIONS_ROOT || path.join(CODEX_HOME, 'sessions'));
 const CODEX_VISUALIZATIONS_ROOT = path.resolve(path.join(CODEX_HOME, 'visualizations'));
+const CODEX_GENERATED_IMAGES_ROOT = path.resolve(path.join(CODEX_HOME, 'generated_images'));
 const CODEX_EXE = process.env.CODEX_EXE || 'codex';
 const MAX_PROMPT_CHARS = 12000;
 const MAX_RESPONSE_CHARS = 8000;
-const MAX_IMAGES_PER_TURN = 4;
+const MAX_INBOUND_IMAGES_PER_TURN = 4;
+const MAX_OUTBOUND_IMAGES_PER_TURN = 12;
 const PENDING_IMAGE_WAIT_MS = 60 * 1000;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const INBOUND_IMAGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -104,7 +106,7 @@ function normalizeInboundImages(resources) {
     seen.add(fileKey);
     const messageId = String(resource.messageId || '').trim();
     images.push(messageId ? { type: 'image', fileKey, messageId } : { type: 'image', fileKey });
-    if (images.length >= MAX_IMAGES_PER_TURN) break;
+    if (images.length >= MAX_INBOUND_IMAGES_PER_TURN) break;
   }
   return images;
 }
@@ -198,7 +200,7 @@ function stageOutboundImages(imagePaths, eventKey) {
   ensureDirectories();
   cleanupOutboundMedia();
   const staged = [];
-  for (const [index, source] of imagePaths.slice(0, MAX_IMAGES_PER_TURN).entries()) {
+  for (const [index, source] of imagePaths.slice(0, MAX_OUTBOUND_IMAGES_PER_TURN).entries()) {
     const buffer = fs.readFileSync(source);
     const extension = detectImageExtension(buffer.subarray(0, 12));
     if (!extension || !buffer.length || buffer.length > MAX_IMAGE_BYTES) continue;
@@ -244,6 +246,45 @@ function normalizeLocalImageTarget(target) {
   return path.isAbsolute(value) ? path.resolve(value) : null;
 }
 
+function isValidLocalImage(candidate) {
+  try {
+    const stat = fs.statSync(candidate);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_IMAGE_BYTES) return false;
+    const header = Buffer.alloc(12);
+    const handle = fs.openSync(candidate, 'r');
+    let bytesRead = 0;
+    try {
+      bytesRead = fs.readSync(handle, header, 0, header.length, 0);
+    } finally {
+      fs.closeSync(handle);
+    }
+    return Boolean(detectImageExtension(header.subarray(0, bytesRead)));
+  } catch {
+    return false;
+  }
+}
+
+function generatedImagesRootForSession(sessionId, generatedImagesRoot = CODEX_GENERATED_IMAGES_ROOT) {
+  const normalized = String(sessionId || '').trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized)) return null;
+  return path.resolve(generatedImagesRoot, normalized);
+}
+
+function normalizeGeneratedImagePath(sessionId, target, generatedImagesRoot = CODEX_GENERATED_IMAGES_ROOT) {
+  const root = generatedImagesRootForSession(sessionId, generatedImagesRoot);
+  const candidate = normalizeLocalImageTarget(target);
+  if (!root || !candidate || !isPathInside(root, candidate) || !isValidLocalImage(candidate)) return null;
+  return candidate;
+}
+
+function collectCompletionImagePaths(sessionId, generatedImagePaths, preparedImagePaths) {
+  const generated = (Array.isArray(generatedImagePaths) ? generatedImagePaths : [])
+    .map((imagePath) => normalizeGeneratedImagePath(sessionId, imagePath))
+    .filter(Boolean);
+  return [...new Set([...generated, ...(Array.isArray(preparedImagePaths) ? preparedImagePaths : [])])]
+    .slice(0, MAX_OUTBOUND_IMAGES_PER_TURN);
+}
+
 function prepareCodexResult(response, workspaceRoot, additionalAllowedRoots = []) {
   const raw = String(response || '');
   const allowedRoots = [workspaceRoot, ...additionalAllowedRoots];
@@ -254,32 +295,20 @@ function prepareCodexResult(response, workspaceRoot, additionalAllowedRoots = []
     let accepted = false;
     try {
       if (!isPathInsideAny(allowedRoots, candidate)) throw new Error('image_outside_workspace');
-      const stat = fs.statSync(candidate);
-      const header = Buffer.alloc(12);
-      const handle = fs.openSync(candidate, 'r');
-      let bytesRead = 0;
-      try {
-        bytesRead = fs.readSync(handle, header, 0, header.length, 0);
-      } finally {
-        fs.closeSync(handle);
-      }
-      accepted = stat.isFile()
-        && stat.size > 0
-        && stat.size <= MAX_IMAGE_BYTES
-        && Boolean(detectImageExtension(header.subarray(0, bytesRead)));
+      accepted = isValidLocalImage(candidate);
     } catch {
       accepted = false;
     }
     if (!accepted) return 'rejected';
     if (seen.has(candidate)) return 'accepted';
-    if (imagePaths.length >= MAX_IMAGES_PER_TURN) return 'limit';
+    if (imagePaths.length >= MAX_OUTBOUND_IMAGES_PER_TURN) return 'limit';
     seen.add(candidate);
     imagePaths.push(candidate);
     return 'accepted';
   };
   const replacementFor = (status, original) => {
     if (status === 'accepted') return '[图片已发送]';
-    if (status === 'limit') return '[图片未发送：每轮最多 4 张]';
+    if (status === 'limit') return `[图片未发送：每轮最多 ${MAX_OUTBOUND_IMAGES_PER_TURN} 张]`;
     if (status === 'rejected') return '[图片未发送：仅允许当前项目或 Codex 生成目录内不超过 10 MB 的 PNG/JPEG/GIF/WebP 图片]';
     return original;
   };
@@ -452,19 +481,38 @@ class CompletionWatcher {
     this.sessionsRoot = path.resolve(options.sessionsRoot || CODEX_SESSIONS_ROOT);
     this.statePath = path.resolve(options.statePath || PATHS.completionWatch);
     this.intervalMs = options.intervalMs || 3000;
+    this.generatedImagesRoot = path.resolve(options.generatedImagesRoot || CODEX_GENERATED_IMAGES_ROOT);
     this.offsets = {};
+    this.pendingGeneratedImages = {};
     this.timer = null;
     this.busy = false;
   }
 
   save() {
-    atomicWriteJson(this.statePath, { schema: 1, offsets: this.offsets, updatedAtUtc: new Date().toISOString() });
+    const pendingGeneratedImages = {};
+    for (const [relativeRollout, imagePaths] of Object.entries(this.pendingGeneratedImages)) {
+      const sessionId = sessionIdFromRolloutPath(relativeRollout);
+      const root = generatedImagesRootForSession(sessionId, this.generatedImagesRoot);
+      if (!root || !Array.isArray(imagePaths)) continue;
+      const relativeImages = imagePaths
+        .map((imagePath) => path.relative(root, imagePath))
+        .filter((imagePath) => imagePath && !path.isAbsolute(imagePath) && !imagePath.startsWith(`..${path.sep}`) && imagePath !== '..')
+        .slice(0, MAX_OUTBOUND_IMAGES_PER_TURN);
+      if (relativeImages.length) pendingGeneratedImages[relativeRollout] = relativeImages;
+    }
+    atomicWriteJson(this.statePath, {
+      schema: 2,
+      offsets: this.offsets,
+      pendingGeneratedImages,
+      updatedAtUtc: new Date().toISOString(),
+    });
   }
 
   async initialize() {
     const saved = readJson(this.statePath);
-    if (!saved || saved.schema !== 1 || !saved.offsets || typeof saved.offsets !== 'object') {
+    if (!saved || ![1, 2].includes(saved.schema) || !saved.offsets || typeof saved.offsets !== 'object') {
       this.offsets = {};
+      this.pendingGeneratedImages = {};
       for (const filePath of listRolloutFiles(this.sessionsRoot)) {
         const relative = path.relative(this.sessionsRoot, filePath);
         try {
@@ -477,6 +525,20 @@ class CompletionWatcher {
       return;
     }
     this.offsets = { ...saved.offsets };
+    this.pendingGeneratedImages = {};
+    if (saved.schema === 2 && saved.pendingGeneratedImages && typeof saved.pendingGeneratedImages === 'object') {
+      for (const [relativeRollout, relativeImages] of Object.entries(saved.pendingGeneratedImages)) {
+        const sessionId = sessionIdFromRolloutPath(relativeRollout);
+        const root = generatedImagesRootForSession(sessionId, this.generatedImagesRoot);
+        if (!root || !Array.isArray(relativeImages)) continue;
+        const restored = relativeImages
+          .filter((imagePath) => typeof imagePath === 'string' && imagePath && !path.isAbsolute(imagePath))
+          .map((imagePath) => normalizeGeneratedImagePath(sessionId, path.resolve(root, imagePath), this.generatedImagesRoot))
+          .filter(Boolean)
+          .slice(0, MAX_OUTBOUND_IMAGES_PER_TURN);
+        if (restored.length) this.pendingGeneratedImages[relativeRollout] = [...new Set(restored)];
+      }
+    }
     await this.scan();
   }
 
@@ -491,7 +553,10 @@ class CompletionWatcher {
         visible.add(relative);
         const stat = fs.statSync(filePath);
         let offset = Number(this.offsets[relative] || 0);
-        if (offset < 0 || offset > stat.size) offset = 0;
+        if (offset < 0 || offset > stat.size) {
+          offset = 0;
+          delete this.pendingGeneratedImages[relative];
+        }
         if (offset === stat.size) continue;
         const length = stat.size - offset;
         const buffer = Buffer.alloc(length);
@@ -508,7 +573,26 @@ class CompletionWatcher {
         const completeBytes = data.subarray(0, lastNewline + 1);
         const sessionId = sessionIdFromRolloutPath(filePath);
         if (sessionId) {
+          let pendingImages = Array.isArray(this.pendingGeneratedImages[relative])
+            ? [...this.pendingGeneratedImages[relative]]
+            : [];
           for (const line of completeBytes.toString('utf8').split('\n')) {
+            if (/"type"\s*:\s*"task_started"/.test(line)) {
+              pendingImages = [];
+              continue;
+            }
+            if (/"type"\s*:\s*"image_generation_end"/.test(line)) {
+              if (!/"status"\s*:\s*"completed"/.test(line)) continue;
+              const imagePath = normalizeGeneratedImagePath(
+                sessionId,
+                extractJsonStringField(line, 'saved_path'),
+                this.generatedImagesRoot,
+              );
+              if (imagePath && !pendingImages.includes(imagePath) && pendingImages.length < MAX_OUTBOUND_IMAGES_PER_TURN) {
+                pendingImages.push(imagePath);
+              }
+              continue;
+            }
             if (!/"type"\s*:\s*"task_complete"/.test(line)) continue;
             const turnId = extractJsonStringField(line, 'turn_id');
             if (!turnId) continue;
@@ -518,13 +602,20 @@ class CompletionWatcher {
               startedAt: extractJsonTimestampField(line, 'started_at'),
               completedAt: extractJsonTimestampField(line, 'completed_at'),
               finalResponse: clipResponse(extractJsonStringField(line, 'last_agent_message')),
+              generatedImagePaths: [...pendingImages],
             });
+            pendingImages = [];
           }
+          if (pendingImages.length) this.pendingGeneratedImages[relative] = pendingImages;
+          else delete this.pendingGeneratedImages[relative];
         }
         this.offsets[relative] = offset + completeBytes.length;
       }
       for (const relative of Object.keys(this.offsets)) {
-        if (!visible.has(relative)) delete this.offsets[relative];
+        if (!visible.has(relative)) {
+          delete this.offsets[relative];
+          delete this.pendingGeneratedImages[relative];
+        }
       }
       this.save();
     } finally {
@@ -633,12 +724,14 @@ async function enqueueWatchedCompletion(event) {
     return false;
   }
   const occurredAt = event.completedAt || new Date().toISOString();
+  const generatedRoot = generatedImagesRootForSession(event.sessionId);
   const prepared = prepareCodexResult(
     event.finalResponse,
     SESSION_WORKSPACES.get(event.sessionId),
-    [CODEX_VISUALIZATIONS_ROOT],
+    [CODEX_VISUALIZATIONS_ROOT, generatedRoot],
   );
-  const stagedImages = stageOutboundImages(prepared.imagePaths, eventKey);
+  const imagePaths = collectCompletionImagePaths(event.sessionId, event.generatedImagePaths, prepared.imagePaths);
+  const stagedImages = stageOutboundImages(imagePaths, eventKey);
   const job = {
     schema: 1,
     kind: 'completion',
@@ -813,7 +906,7 @@ function listCodexThreads(options = {}) {
       method: 'initialize',
       id: 1,
       params: {
-        clientInfo: { name: 'codex_feishu_bridge', title: 'Codex Feishu Bridge', version: '1.2.0' },
+        clientInfo: { name: 'codex_feishu_bridge', title: 'Codex Feishu Bridge', version: '1.3.0' },
       },
     });
   });
@@ -933,7 +1026,10 @@ function runCodexSession(session, prompt, options = {}) {
           return;
         }
         const response = fs.existsSync(outputFile) ? fs.readFileSync(outputFile, 'utf8') : '';
-        resolve(prepareCodexResult(response, options.workspaceRoot));
+        resolve(prepareCodexResult(response, options.workspaceRoot, [
+          CODEX_VISUALIZATIONS_ROOT,
+          generatedImagesRootForSession(session.sessionId),
+        ]));
       } finally {
         fs.rmSync(outputFile, { force: true });
       }
@@ -1183,7 +1279,7 @@ class BridgeRuntime {
       : { text: clipResponse(response && response.text), imagePaths: Array.isArray(response && response.imagePaths) ? response.imagePaths : [] };
     if (result.text) await this.sendText(job.chatId, result.text, job.messageId);
     let imageFailures = 0;
-    for (const imagePath of result.imagePaths.slice(0, MAX_IMAGES_PER_TURN)) {
+    for (const imagePath of result.imagePaths.slice(0, MAX_OUTBOUND_IMAGES_PER_TURN)) {
       try {
         await this.sendImage(job.chatId, imagePath, job.messageId);
       } catch (error) {
@@ -1227,7 +1323,7 @@ class BridgeRuntime {
     const imagePaths = (Array.isArray(job.imagePaths) ? job.imagePaths : [])
       .map((item) => path.resolve(String(item)))
       .filter((item) => isPathInside(PATHS.outboundMedia, item) && fs.existsSync(item))
-      .slice(0, MAX_IMAGES_PER_TURN);
+      .slice(0, MAX_OUTBOUND_IMAGES_PER_TURN);
     if (job.textSent !== true) {
       await this.sendText(job.targetChatId, job.message);
       job.textSent = true;
@@ -1406,6 +1502,7 @@ module.exports = {
   clipResponse,
   cleanupInboundMedia,
   cleanupOutboundMedia,
+  collectCompletionImagePaths,
   defaultState,
   detectImageExtension,
   enqueueWatchedCompletion,
@@ -1415,6 +1512,7 @@ module.exports = {
   findSession,
   formatSessionList,
   formatCompletionMessage,
+  generatedImagesRootForSession,
   getPairedChatId,
   loadSessions,
   loadState,
@@ -1424,6 +1522,7 @@ module.exports = {
   markRemoteSessionStarted,
   normalizeState,
   normalizeInboundImages,
+  normalizeGeneratedImagePath,
   pairingHash,
   parseCommand,
   prepareCodexResult,

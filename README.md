@@ -6,7 +6,7 @@
 
 - 电脑端任意 Codex 对话结束后，全局推送标题、项目、匿名对话码和最终回复。
 - 通过 `/list`、`/use 序号` 或 `#序号 消息` 路由多个 Codex 对话，同时兼容匿名对话码。
-- 从飞书发送文字或图片到 Codex，并把最终回复与明确引用的图片发回飞书。
+- 从飞书发送文字或图片到 Codex，并把最终回复、明确引用的图片及同轮 ImageGen 产物发回飞书。
 - 飞书先发图片、再发文字时自动合并；60 秒内没有说明则自动分析图片。
 - 使用 WebSocket 长连接，无需公网服务器或家庭网络端口映射。
 - Windows 使用 DPAPI `CurrentUser`、macOS 使用 Keychain 保存 App Secret。
@@ -104,9 +104,9 @@ macOS 运行数据位于 `~/Library/Application Support/CodexFeishuBridge`。卸
 
 - 不读取或上传 OpenAI API Key。
 - `/list` 只保存标题、项目目录最后一级、时间和匿名对话码。
-- 不向飞书同步完整历史、工具输出或未明确引用的本机文件。
-- 图片每轮最多 4 张、每张最多 10 MB，并校验 PNG、JPEG、GIF 或 WebP 文件签名。
-- 出站图片仅允许来自当前工作目录或 Codex visualizations 目录。
+- 不向飞书同步完整历史或一般工具输出；只发送最终回复、明确引用的图片及当前轮次的 ImageGen 产物。
+- 手机传入每轮最多 4 张，Codex 发回每轮最多 12 张；每张最多 10 MB，并校验 PNG、JPEG、GIF 或 WebP 文件签名。
+- 出站图片仅允许来自当前工作目录、Codex visualizations 目录或当前对话专属的 generated_images 目录。
 - 只接受完成本机一次性配对的飞书用户，且拒绝群聊消息。
 
 ## 测试
