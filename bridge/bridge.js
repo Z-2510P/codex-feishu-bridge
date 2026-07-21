@@ -300,7 +300,7 @@ function prepareCodexResult(response, workspaceRoot, additionalAllowedRoots = []
   cleaned += raw.slice(cursor);
   const barePathPatterns = process.platform === 'win32'
     ? [/[A-Za-z]:[\\/][^<>\r\n"|?*]*?\.(?:png|jpe?g|gif|webp)/gi]
-    : [/(^|[\s(])((?:\/(?:Users|Volumes|private|tmp)\/)[^<>\r\n"]*?\.(?:png|jpe?g|gif|webp))/gim];
+    : [/(^|[\s(])((?:\/(?:Users|Volumes|private|tmp|var)\/)[^<>\r\n"]*?\.(?:png|jpe?g|gif|webp))/gim];
   for (const barePathPattern of barePathPatterns) {
     cleaned = cleaned.replace(barePathPattern, (...args) => {
       const value = process.platform === 'win32' ? args[0] : args[2];
@@ -712,7 +712,9 @@ function loadSessions() {
 function safeProjectLeaf(cwd) {
   const value = String(cwd || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
   if (!value) return 'unknown';
-  const leaf = path.basename(value.replace(/[\\/]+$/, '')) || path.parse(value).root.replace(/[\\/]+$/, '') || 'unknown';
+  const trimmed = value.replace(/[\\/]+$/, '');
+  const segments = trimmed.split(/[\\/]/).filter(Boolean);
+  const leaf = segments.at(-1) || trimmed || 'unknown';
   return leaf.replace(/[<>&]/g, '_').slice(0, 120) || 'unknown';
 }
 
