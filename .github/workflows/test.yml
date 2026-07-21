@@ -22,3 +22,19 @@ jobs:
         run: ./tests/Run-Tests.ps1
       - shell: powershell
         run: ./bridge/tests/Run-PowerShellTests.ps1
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bridge/package-lock.json
+      - run: npm ci
+        working-directory: bridge
+      - run: npm test
+        working-directory: bridge
+      - run: bash -n Install.sh bridge/CodexFeishuBridge.sh bridge/tests/run-macos-tests.sh
+      - run: chmod +x bridge/CodexFeishuBridge.sh bridge/tests/run-macos-tests.sh && bridge/tests/run-macos-tests.sh

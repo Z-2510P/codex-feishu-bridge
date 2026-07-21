@@ -2,16 +2,21 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 const { fileURLToPath } = require('node:url');
 const Lark = require('@larksuiteoapi/node-sdk');
 
-const DEFAULT_DATA_ROOT = path.join(process.env.LOCALAPPDATA || process.cwd(), 'CodexFeishuBridge');
+const USER_HOME = os.homedir() || process.env.USERPROFILE || process.env.HOME || process.cwd();
+const DEFAULT_DATA_PARENT = process.platform === 'win32'
+  ? (process.env.LOCALAPPDATA || process.cwd())
+  : path.join(USER_HOME, 'Library', 'Application Support');
+const DEFAULT_DATA_ROOT = path.join(DEFAULT_DATA_PARENT, 'CodexFeishuBridge');
 const DATA_ROOT = path.resolve(process.env.CODEX_FEISHU_BRIDGE_DATA_ROOT || DEFAULT_DATA_ROOT);
 const SESSIONS_DIR = path.resolve(process.env.CODEX_FEISHU_SESSIONS_DIR || path.join(DATA_ROOT, 'sessions'));
-const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(process.env.USERPROFILE || process.cwd(), '.codex'));
+const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(USER_HOME, '.codex'));
 const CODEX_SESSIONS_ROOT = path.resolve(process.env.CODEX_SESSIONS_ROOT || path.join(CODEX_HOME, 'sessions'));
 const CODEX_VISUALIZATIONS_ROOT = path.resolve(path.join(CODEX_HOME, 'visualizations'));
 const CODEX_EXE = process.env.CODEX_EXE || 'codex';
@@ -293,11 +298,17 @@ function prepareCodexResult(response, workspaceRoot, additionalAllowedRoots = []
     cleaned += replacementFor(registerCandidate(candidate), match[0]);
   }
   cleaned += raw.slice(cursor);
-  const barePathPattern = /[A-Za-z]:[\\/][^<>\r\n"|?*]*?\.(?:png|jpe?g|gif|webp)/gi;
-  cleaned = cleaned.replace(barePathPattern, (value) => {
-    const candidate = normalizeLocalImageTarget(value);
-    return replacementFor(registerCandidate(candidate), value);
-  });
+  const barePathPatterns = process.platform === 'win32'
+    ? [/[A-Za-z]:[\\/][^<>\r\n"|?*]*?\.(?:png|jpe?g|gif|webp)/gi]
+    : [/(^|[\s(])((?:\/(?:Users|Volumes|private|tmp)\/)[^<>\r\n"]*?\.(?:png|jpe?g|gif|webp))/gim];
+  for (const barePathPattern of barePathPatterns) {
+    cleaned = cleaned.replace(barePathPattern, (...args) => {
+      const value = process.platform === 'win32' ? args[0] : args[2];
+      const prefix = process.platform === 'win32' ? '' : args[1];
+      const candidate = normalizeLocalImageTarget(value);
+      return `${prefix}${replacementFor(registerCandidate(candidate), value)}`;
+    });
+  }
   return {
     text: clipResponse(cleaned.trim() || (imagePaths.length ? 'Codex 已生成图片。' : 'Codex 已完成，但没有返回文本结果。')),
     imagePaths,
@@ -793,7 +804,7 @@ function listCodexThreads(options = {}) {
       method: 'initialize',
       id: 1,
       params: {
-        clientInfo: { name: 'codex_feishu_bridge', title: 'Codex Feishu Bridge', version: '1.0.0' },
+        clientInfo: { name: 'codex_feishu_bridge', title: 'Codex Feishu Bridge', version: '1.1.0' },
       },
     });
   });
