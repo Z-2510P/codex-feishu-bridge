@@ -1,0 +1,17 @@
+node_modules/
+*.log
+*.dpapi
+*.bak*
+.env
+.env.*
+runtime.json
+state.json
+completion-watch.json
+bridge.pid
+inbox/
+outbox/
+dead-letter/
+media/
+sessions/
+work/
+

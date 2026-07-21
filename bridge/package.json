@@ -1,0 +1,14 @@
+{
+  "name": "codex-feishu-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Feishu application-bot bridge for resuming Codex conversations",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node bridge.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.56.0"
+  }
+}

@@ -1,0 +1,25 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bridge/package-lock.json
+      - run: npm ci
+        working-directory: bridge
+      - run: npm test
+        working-directory: bridge
+      - shell: powershell
+        run: ./tests/Run-Tests.ps1
+      - shell: powershell
+        run: ./bridge/tests/Run-PowerShellTests.ps1
+
