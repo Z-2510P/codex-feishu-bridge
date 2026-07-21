@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 $managerPath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\CodexFeishuBridge.ps1'))
 $testRoot = Join-Path $env:TEMP ('CodexFeishuBridge-ps-tests-' + [Guid]::NewGuid().ToString('N'))
+$previousCodexExe = [Environment]::GetEnvironmentVariable('CODEX_EXE')
 $passed = 0
 $failed = 0
 
@@ -40,6 +41,9 @@ try {
     $pairingProperties = @($state.pairing.PSObject.Properties.Name)
     Assert-True ($pairingProperties.Count -eq 2 -and $pairingProperties -contains 'hash' -and $pairingProperties -contains 'expiresAtUtc') 'State contains no plaintext pairing-code field'
     Assert-True ([DateTimeOffset]$state.pairing.expiresAtUtc -gt [DateTimeOffset]::UtcNow) 'Pairing code has a future expiry'
+    $fakeCodex = Join-Path $testRoot 'codex.exe'
+    [System.IO.File]::WriteAllBytes($fakeCodex, [byte[]]@(0))
+    $env:CODEX_EXE = $fakeCodex
     $codexPath = Get-CodexPath
     Assert-True ((Test-Path -LiteralPath $codexPath -PathType Leaf) -and ([IO.Path]::GetFileName($codexPath) -eq 'codex.exe')) 'Codex executable resolves to a current absolute path'
     Assert-True ($null -eq (Get-BridgePid)) 'No bridge process is reported for an offline test root'
@@ -49,6 +53,12 @@ try {
     if ($failed -gt 0) { exit 1 }
 }
 finally {
+    if ([string]::IsNullOrWhiteSpace($previousCodexExe)) {
+        Remove-Item Env:CODEX_EXE -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:CODEX_EXE = $previousCodexExe
+    }
     if (Test-Path -LiteralPath $testRoot) {
         $resolved = [System.IO.Path]::GetFullPath($testRoot)
         $tempRoot = [System.IO.Path]::GetFullPath($env:TEMP)
