@@ -806,7 +806,7 @@ function listCodexThreads(options = {}) {
       method: 'initialize',
       id: 1,
       params: {
-        clientInfo: { name: 'codex_feishu_bridge', title: 'Codex Feishu Bridge', version: '1.1.0' },
+        clientInfo: { name: 'codex_feishu_bridge', title: 'Codex Feishu Bridge', version: '1.1.1' },
       },
     });
   });

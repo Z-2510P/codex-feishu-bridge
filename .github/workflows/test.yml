@@ -36,5 +36,5 @@ jobs:
         working-directory: bridge
       - run: npm test
         working-directory: bridge
-      - run: bash -n Install.sh bridge/CodexFeishuBridge.sh bridge/tests/run-macos-tests.sh
+      - run: bash -n Install.sh bridge/CodexFeishuBridge.sh bridge/tests/run-macos-tests.sh "packaging/macos/Install Codex Feishu Bridge.command"
       - run: chmod +x bridge/CodexFeishuBridge.sh bridge/tests/run-macos-tests.sh && bridge/tests/run-macos-tests.sh

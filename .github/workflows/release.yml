@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   package:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
       - name: Build platform archives
@@ -19,6 +19,7 @@ jobs:
           version="${GITHUB_REF_NAME}"
           win="dist/codex-feishu-bridge-windows-${version}"
           mac="dist/codex-feishu-bridge-macos-${version}"
+          dmg_root="dist/dmg-root"
           mkdir -p "$win/bridge/tests" "$win/tests" "$mac/bridge/tests"
 
           cp README.md LICENSE SECURITY.md Install.ps1 CodexFeishuNotifier.ps1 "$win/"
@@ -33,11 +34,20 @@ jobs:
 
           (cd dist && zip -qr "codex-feishu-bridge-windows-${version}.zip" "codex-feishu-bridge-windows-${version}")
           (cd dist && zip -qr "codex-feishu-bridge-macos-${version}.zip" "codex-feishu-bridge-macos-${version}")
+
+          mkdir -p "$dmg_root/Payload"
+          cp -R "$mac/"* "$dmg_root/Payload/"
+          cp "packaging/macos/Install Codex Feishu Bridge.command" "$dmg_root/"
+          cp packaging/macos/README.txt LICENSE "$dmg_root/"
+          chmod +x "$dmg_root/Install Codex Feishu Bridge.command" "$dmg_root/Payload/Install.sh" "$dmg_root/Payload/bridge/CodexFeishuBridge.sh"
+          hdiutil create -volname "Codex Feishu Bridge" -srcfolder "$dmg_root" -ov -format UDZO "dist/codex-feishu-bridge-macos-${version}.dmg"
+          hdiutil verify "dist/codex-feishu-bridge-macos-${version}.dmg"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             "dist/codex-feishu-bridge-windows-${GITHUB_REF_NAME}.zip" \
+            "dist/codex-feishu-bridge-macos-${GITHUB_REF_NAME}.dmg" \
             "dist/codex-feishu-bridge-macos-${GITHUB_REF_NAME}.zip" \
             --verify-tag --generate-notes --title "Codex Feishu Bridge ${GITHUB_REF_NAME}"

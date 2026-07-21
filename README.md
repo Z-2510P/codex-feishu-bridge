@@ -45,6 +45,10 @@ Windows 安装器会隐藏读取 App Secret、安装依赖、合并用户级 Cod
 
 ## macOS 安装
 
+推荐从 [GitHub Releases](https://github.com/Z-2510P/codex-feishu-bridge/releases) 下载最新的 `.dmg`，打开后双击 `Install Codex Feishu Bridge.command`。未签名的社区构建首次运行时，可能需要按住 Control 点击安装器并选择“打开”。
+
+也可以从源码安装：
+
 ```bash
 git clone https://github.com/Z-2510P/codex-feishu-bridge.git
 cd codex-feishu-bridge
